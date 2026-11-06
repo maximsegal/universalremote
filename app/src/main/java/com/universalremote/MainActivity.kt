@@ -18,44 +18,56 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
-    private lateinit var remote: SamsungRemote
+    private lateinit var samsung: SamsungRemote
+    private lateinit var lg: LgRemote
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        remote = SamsungRemote(this)
+        samsung = SamsungRemote(this)
+        lg = LgRemote(this)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { RemoteScreen(remote) }
+                Surface(Modifier.fillMaxSize()) { RemoteScreen(samsung, lg) }
             }
         }
     }
 
     override fun onDestroy() {
-        remote.disconnect()
+        samsung.disconnect()
+        lg.disconnect()
         super.onDestroy()
     }
 }
 
 @Composable
-fun RemoteScreen(remote: SamsungRemote) {
+fun RemoteScreen(samsung: TvRemote, lg: TvRemote) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("remote", android.content.Context.MODE_PRIVATE) }
+    var brand by remember { mutableStateOf(if (prefs.getString("brand", "") == "LG") Brand.LG else Brand.Samsung) }
+    val remote = if (brand == Brand.LG) lg else samsung
     var state by remember { mutableStateOf(ConnState.Disconnected) }
     var message by remember { mutableStateOf<String?>(null) }
-    var ip by remember { mutableStateOf(remote.savedIp) }
-    var found by remember { mutableStateOf<List<String>>(emptyList()) }
+    var ip by remember { mutableStateOf(prefs.getString("ip", "") ?: "") }
+    var found by remember { mutableStateOf<List<FoundTv>>(emptyList()) }
     var scanning by remember { mutableStateOf(false) }
+    var scanned by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
 
-    DisposableEffect(remote) {
+    DisposableEffect(brand) {
+        val other = if (brand == Brand.LG) samsung else lg
+        other.onState = { _, _ -> }
+        other.disconnect()
         remote.onState = { s, m ->
             android.os.Handler(android.os.Looper.getMainLooper()).post { state = s; message = m }
         }
-        if (ip.isNotBlank()) remote.connect(ip)
+        state = ConnState.Disconnected; message = null
+        if (ip.isNotBlank()) remote.connect(ip.trim())
         onDispose { }
     }
 
@@ -67,16 +79,25 @@ fun RemoteScreen(remote: SamsungRemote) {
 
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
         ConnectionBar(
-            state, message, ip, found, scanning,
+            state, message, ip, found, scanning, scanned, brand,
+            onBrand = { brand = it; prefs.edit().putString("brand", it.name).apply() },
             onIp = { ip = it },
+            onPick = { tv ->
+                ip = tv.ip
+                brand = tv.brand
+                prefs.edit().putString("brand", tv.brand.name).apply()
+            },
             onConnect = { remote.connect(ip.trim()) },
             onScan = {
                 scanning = true
                 thread {
-                    val r = SamsungRemote.discover(context)
+                    val r = Discovery.scan(context)
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        found = r; scanning = false
-                        if (r.isNotEmpty() && ip.isBlank()) ip = r.first()
+                        found = r; scanning = false; scanned = true
+                        if (r.size == 1) {
+                            ip = r[0].ip; brand = r[0].brand
+                            prefs.edit().putString("brand", r[0].brand.name).apply()
+                        }
                     }
                 }
             },
@@ -99,7 +120,8 @@ fun RemoteScreen(remote: SamsungRemote) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectionBar(
-    state: ConnState, message: String?, ip: String, found: List<String>, scanning: Boolean,
+    state: ConnState, message: String?, ip: String, found: List<FoundTv>, scanning: Boolean, scanned: Boolean,
+    brand: Brand, onBrand: (Brand) -> Unit, onPick: (FoundTv) -> Unit,
     onIp: (String) -> Unit, onConnect: () -> Unit, onScan: () -> Unit,
 ) {
     Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -116,7 +138,15 @@ fun ConnectionBar(
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onScan, enabled = !scanning) { Text(if (scanning) "Scanning…" else "Find TV") }
-            found.forEach { AssistChip(onClick = { onIp(it) }, label = { Text(it) }) }
+            Brand.values().forEach { FilterChip(selected = brand == it, onClick = { onBrand(it) }, label = { Text(it.label) }) }
+        }
+        if (found.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                found.forEach { AssistChip(onClick = { onPick(it) }, label = { Text("${it.brand.label} ${it.ip}") }) }
+            }
+        } else if (scanned && !scanning) {
+            Text("No TV found. Check that phone and TV are on the same Wi-Fi, then type the IP manually.",
+                style = MaterialTheme.typography.labelSmall)
         }
         Text(
             when (state) {
@@ -139,7 +169,7 @@ fun RemoteBtn(label: String? = null, icon: ImageVector? = null, key: String, onK
         contentPadding = PaddingValues(4.dp),
     ) {
         if (icon != null) Icon(icon, contentDescription = label ?: key)
-        else Text(label ?: key, style = MaterialTheme.typography.labelLarge)
+        else Text(label ?: key, fontSize = 12.sp, maxLines = 1, softWrap = false)
     }
 }
 
@@ -220,24 +250,23 @@ fun RemoteTab(onKey: (String) -> Unit) {
 }
 
 @Composable
-fun KeyboardTab(remote: SamsungRemote, onKey: (String) -> Unit) {
+fun KeyboardTab(remote: TvRemote, onKey: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     var digits by remember { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Text / characters", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Open a search box or any text field on the TV, then type here and press Send.",
+            "Open a search box on the TV, type here and press Send. Then use the TV's own Done/OK. (Enter can type the highlighted on-screen key.)",
             style = MaterialTheme.typography.bodySmall,
         )
         OutlinedTextField(
             value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(),
             label = { Text("Letters, symbols, any language") },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { if (text.isNotEmpty()) { remote.text(text); onKey("KEY_ENTER") ; text = "" } }),
+            keyboardActions = KeyboardActions(onSend = { if (text.isNotEmpty()) { remote.text(text); text = "" } }),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { remote.text(text) }, enabled = text.isNotEmpty()) { Text("Send") }
-            Button(onClick = { remote.text(text); onKey("KEY_ENTER"); text = "" }, enabled = text.isNotEmpty()) { Text("Send + Enter") }
+            Button(onClick = { remote.text(text); text = "" }, enabled = text.isNotEmpty()) { Text("Send") }
             OutlinedButton(onClick = { text = "" }) { Text("Clear") }
         }
 
@@ -260,8 +289,9 @@ fun KeyboardTab(remote: SamsungRemote, onKey: (String) -> Unit) {
         HorizontalDivider()
         Text("Quick edit keys", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { onKey("KEY_ENTER") }) { Text("Enter") }
-            OutlinedButton(onClick = { onKey("KEY_RETURN") }) { Text("Back/Del") }
+            OutlinedButton(onClick = { onKey("KEY_ENTER") }) { Text("OK") }
+            OutlinedButton(onClick = { remote.backspace() }) { Text("⌫ (LG)") }
+            OutlinedButton(onClick = { onKey("KEY_RETURN") }) { Text("Back") }
             OutlinedButton(onClick = { onKey("KEY_LEFT") }) { Text("←") }
             OutlinedButton(onClick = { onKey("KEY_RIGHT") }) { Text("→") }
         }
