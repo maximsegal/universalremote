@@ -119,4 +119,14 @@ class SamsungRemote(context: Context) : TvRemote {
     )
 
     override fun backspace(): Boolean = false
+
+    override fun move(dx: Int, dy: Int): Boolean = send(
+        JSONObject().put("Cmd", "Move").put("TypeOfRemote", "ProcessMouseDevice").put(
+            "Position", JSONObject().put("x", dx).put("y", dy).put("Time", System.currentTimeMillis().toString())
+        )
+    )
+
+    override fun click(): Boolean = send(
+        JSONObject().put("Cmd", "LeftClick").put("TypeOfRemote", "ProcessMouseDevice")
+    )
 }

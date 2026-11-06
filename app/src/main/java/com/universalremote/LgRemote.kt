@@ -166,6 +166,10 @@ class LgRemote(context: Context) : TvRemote {
         else -> if (code.length == 5 && code.startsWith("KEY_") && code[4].isDigit()) button(code.substring(4)) else false
     }
 
+    override fun move(dx: Int, dy: Int): Boolean = pointer?.send("type:move\ndx:$dx\ndy:$dy\ndown:0\n\n") ?: false
+    override fun click(): Boolean = pointer?.send("type:click\n\n") ?: false
+    override fun scroll(dy: Int): Boolean = pointer?.send("type:scroll\ndx:0\ndy:$dy\n\n") ?: false
+
     override fun text(text: String): Boolean =
         ssap("ssap://com.webos.service.ime/insertText", JSONObject().put("text", text).put("replace", 0))
 

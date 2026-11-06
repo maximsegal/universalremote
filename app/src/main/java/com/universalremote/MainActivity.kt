@@ -5,7 +5,14 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlin.math.roundToInt
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -127,12 +134,14 @@ fun RemoteScreen(remotes: Map<Brand, TvRemote>) {
         TabRow(selectedTabIndex = tab) {
             Tab(tab == 0, { tab = 0 }, text = { Text("Remote") })
             Tab(tab == 1, { tab = 1 }, text = { Text("Keyboard") })
-            Tab(tab == 2, { tab = 2 }, text = { Text("Apps") })
+            Tab(tab == 2, { tab = 2 }, text = { Text("Touchpad") })
+            Tab(tab == 3, { tab = 3 }, text = { Text("Apps") })
         }
         Box(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(12.dp)) {
             when (tab) {
                 0 -> RemoteTab(::press)
                 1 -> KeyboardTab(remote, ::press)
+                2 -> TouchpadTab(remote, ::press)
                 else -> AppsTab(::press)
             }
         }
@@ -345,6 +354,31 @@ fun AppsTab(onKey: (String) -> Unit) {
                     FilledTonalButton(onClick = { onKey(key) }, modifier = Modifier.weight(1f)) { Text(label, maxLines = 1) }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun TouchpadTab(remote: TvRemote, onKey: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Drag to move the pointer, tap to click. Use this in the TV's browser or web apps.", style = MaterialTheme.typography.bodySmall)
+        Box(
+            Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .pointerInput(Unit) { detectTapGestures(onTap = { remote.click() }) }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, drag ->
+                        change.consume()
+                        remote.move((drag.x * 2).roundToInt(), (drag.y * 2).roundToInt())
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) { Text("Touchpad", style = MaterialTheme.typography.labelLarge) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { remote.click() }) { Text("Click") }
+            OutlinedButton(onClick = { remote.scroll(-10) }) { Text("Scroll ↑") }
+            OutlinedButton(onClick = { remote.scroll(10) }) { Text("Scroll ↓") }
+            OutlinedButton(onClick = { onKey("KEY_RETURN") }) { Text("Back") }
         }
     }
 }

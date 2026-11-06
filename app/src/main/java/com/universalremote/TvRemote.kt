@@ -19,6 +19,10 @@ interface TvRemote {
     fun key(code: String): Boolean
     fun text(text: String): Boolean
     fun backspace(): Boolean
+    /** Pointer/mouse control for browsers and web apps on the TV. */
+    fun move(dx: Int, dy: Int): Boolean = false
+    fun click(): Boolean = false
+    fun scroll(dy: Int): Boolean = false
 }
 
 fun TvRemote.digit(d: Char): Boolean = key("KEY_$d")
