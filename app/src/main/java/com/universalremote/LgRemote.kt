@@ -53,11 +53,16 @@ class LgRemote(context: Context) : TvRemote {
                                 ?.let { prefs.edit().putString(keyKey(ip), it).apply() }
                             prefs.edit().putString("ip", ip).apply()
                             onState(ConnState.Connected, null)
+                            Wol.save(prefs, ip, listOfNotNull(Wol.arp(ip)))
+                            webSocket.send(JSONObject().put("type", "request").put("id", "conn")
+                                .put("uri", "ssap://com.webos.service.connectionmanager/getinfo").toString())
                             webSocket.send(JSONObject().put("type", "request").put("id", "pointer")
                                 .put("uri", "ssap://com.webos.service.networkinput/getPointerInputSocket").toString())
                         }
                         "response" -> {
-                            if (json.optString("id") == "pointer") {
+                            if (json.optString("id") == "conn") {
+                                Wol.save(prefs, ip, Wol.macsIn(payload))
+                            } else if (json.optString("id") == "pointer") {
                                 payload?.optString("socketPath")?.takeIf { it.isNotEmpty() }?.let { openPointer(it, gen) }
                             } else if (payload?.optString("pairingType") == "PROMPT") {
                                 onState(ConnState.WaitingForApproval, "Accept the prompt on your TV")

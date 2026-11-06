@@ -6,6 +6,7 @@ import android.os.Vibrator
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -24,68 +25,88 @@ import androidx.compose.foundation.text.KeyboardOptions
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
-    private lateinit var samsung: SamsungRemote
-    private lateinit var lg: LgRemote
+    private lateinit var remotes: Map<Brand, TvRemote>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        samsung = SamsungRemote(this)
-        lg = LgRemote(this)
+        remotes = mapOf(Brand.Samsung to SamsungRemote(this), Brand.LG to LgRemote(this), Brand.Roku to RokuRemote(this))
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { RemoteScreen(samsung, lg) }
+                Surface(Modifier.fillMaxSize()) { RemoteScreen(remotes) }
             }
         }
     }
 
     override fun onDestroy() {
-        samsung.disconnect()
-        lg.disconnect()
+        remotes.values.forEach { it.disconnect() }
         super.onDestroy()
     }
 }
 
 @Composable
-fun RemoteScreen(samsung: TvRemote, lg: TvRemote) {
+fun RemoteScreen(remotes: Map<Brand, TvRemote>) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val prefs = remember { context.getSharedPreferences("remote", android.content.Context.MODE_PRIVATE) }
-    var brand by remember { mutableStateOf(if (prefs.getString("brand", "") == "LG") Brand.LG else Brand.Samsung) }
-    val remote = if (brand == Brand.LG) lg else samsung
+    var brand by remember { mutableStateOf(Brand.values().firstOrNull { it.name == prefs.getString("brand", "") } ?: Brand.Samsung) }
+    val remote = remotes.getValue(brand)
     var state by remember { mutableStateOf(ConnState.Disconnected) }
     var message by remember { mutableStateOf<String?>(null) }
     var ip by remember { mutableStateOf(prefs.getString("ip", "") ?: "") }
+    var mac by remember { mutableStateOf("") }
+    var needMac by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<List<FoundTv>>(emptyList()) }
     var scanning by remember { mutableStateOf(false) }
     var scanned by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
+    val ui = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
 
     DisposableEffect(brand) {
-        val other = if (brand == Brand.LG) samsung else lg
-        other.onState = { _, _ -> }
-        other.disconnect()
-        remote.onState = { s, m ->
-            android.os.Handler(android.os.Looper.getMainLooper()).post { state = s; message = m }
-        }
+        remotes.forEach { (b, r) -> if (b != brand) { r.onState = { _, _ -> }; r.disconnect() } }
+        remote.onState = { s, m -> ui.post { state = s; message = m } }
         state = ConnState.Disconnected; message = null
         if (ip.isNotBlank()) remote.connect(ip.trim())
         onDispose { }
     }
 
+    /** Powers the TV on while it is off: Wake-on-LAN, then reconnect. */
+    fun wake() {
+        val host = ip.trim()
+        if (host.isBlank()) { message = "Enter the TV's IP first"; return }
+        Wol.normalize(mac)?.let { Wol.save(prefs, host, listOf(it)) }
+        val macs = Wol.get(prefs, host)
+        if (macs.isEmpty()) {
+            needMac = true
+            message = "Unknown TV MAC. Enter it below (TV Settings > Network > status), or connect once while the TV is on."
+            return
+        }
+        needMac = false
+        message = "Wake signal sent… connecting"
+        thread { Wol.send(host, macs) }
+        for (delay in longArrayOf(6000, 14000)) {
+            ui.postDelayed({ if (state != ConnState.Connected) remote.connect(host) }, delay)
+        }
+    }
+
     val vibrator = remember { context.getSystemService(Vibrator::class.java) }
     fun press(key: String) {
         vibrator?.vibrate(VibrationEffect.createOneShot(15, VibrationEffect.DEFAULT_AMPLITUDE))
-        remote.key(key)
+        if (key == "KEY_POWER" && state != ConnState.Connected) wake() else remote.key(key)
     }
 
     Column(Modifier.fillMaxSize().systemBarsPadding()) {
         ConnectionBar(
-            state, message, ip, found, scanning, scanned, brand,
+            state, message, ip, found, scanning, scanned, brand, mac, needMac,
+            onMac = { mac = it }, onWake = { wake() },
             onBrand = { brand = it; prefs.edit().putString("brand", it.name).apply() },
             onIp = { ip = it },
             onPick = { tv ->
                 ip = tv.ip
-                brand = tv.brand
-                prefs.edit().putString("brand", tv.brand.name).apply()
+                if (tv.brand != null) {
+                    brand = tv.brand
+                    prefs.edit().putString("brand", tv.brand.name).apply()
+                } else {
+                    android.widget.Toast.makeText(context, "${tv.label} found, but this app can't control it yet (supported: Samsung, LG, Roku)", android.widget.Toast.LENGTH_LONG).show()
+                }
             },
             onConnect = { remote.connect(ip.trim()) },
             onScan = {
@@ -94,9 +115,10 @@ fun RemoteScreen(samsung: TvRemote, lg: TvRemote) {
                     val r = Discovery.scan(context)
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
                         found = r; scanning = false; scanned = true
-                        if (r.size == 1) {
-                            ip = r[0].ip; brand = r[0].brand
-                            prefs.edit().putString("brand", r[0].brand.name).apply()
+                        val only = r.singleOrNull()
+                        if (only != null) {
+                            ip = only.ip
+                            only.brand?.let { brand = it; prefs.edit().putString("brand", it.name).apply() }
                         }
                     }
                 }
@@ -121,7 +143,8 @@ fun RemoteScreen(samsung: TvRemote, lg: TvRemote) {
 @Composable
 fun ConnectionBar(
     state: ConnState, message: String?, ip: String, found: List<FoundTv>, scanning: Boolean, scanned: Boolean,
-    brand: Brand, onBrand: (Brand) -> Unit, onPick: (FoundTv) -> Unit,
+    brand: Brand, mac: String, needMac: Boolean, onMac: (String) -> Unit, onWake: () -> Unit,
+    onBrand: (Brand) -> Unit, onPick: (FoundTv) -> Unit,
     onIp: (String) -> Unit, onConnect: () -> Unit, onScan: () -> Unit,
 ) {
     Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
@@ -136,13 +159,14 @@ fun ConnectionBar(
                 Text(if (state == ConnState.Connected) "Reconnect" else "Connect")
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onScan, enabled = !scanning) { Text(if (scanning) "Scanning…" else "Find TV") }
+            TextButton(onClick = onWake) { Text("Power on") }
             Brand.values().forEach { FilterChip(selected = brand == it, onClick = { onBrand(it) }, label = { Text(it.label) }) }
         }
         if (found.isNotEmpty()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                found.forEach { AssistChip(onClick = { onPick(it) }, label = { Text("${it.brand.label} ${it.ip}") }) }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                found.forEach { AssistChip(onClick = { onPick(it) }, label = { Text("${it.name ?: it.label} · ${it.ip}", maxLines = 1) }) }
             }
         } else if (scanned && !scanning) {
             Text("No TV found. Check that phone and TV are on the same Wi-Fi, then type the IP manually.",
@@ -158,6 +182,14 @@ fun ConnectionBar(
             style = MaterialTheme.typography.labelMedium,
             color = if (state == ConnState.Connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (needMac) {
+            OutlinedTextField(
+                value = mac, onValueChange = onMac, singleLine = true, label = { Text("TV MAC address (AA:BB:CC:DD:EE:FF)") },
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { onWake() }),
+            )
+        }
     }
 }
 

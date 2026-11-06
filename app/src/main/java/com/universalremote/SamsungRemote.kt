@@ -20,10 +20,36 @@ class SamsungRemote(context: Context) : TvRemote {
     override var onState: (ConnState, String?) -> Unit = { _, _ -> }
 
     private fun tokenKey(ip: String) = "samsung_token_$ip"
+    @Volatile private var currentIp: String? = null
+
+    /** Learns the TV's MAC (for Wake-on-LAN) from its REST info endpoint. */
+    private fun learnMac(ip: String) = Thread {
+        try {
+            Net.client.newCall(Request.Builder().url("http://$ip:8001/api/v2/").build()).execute().use { r ->
+                val macs = Wol.macsIn(JSONObject(r.body?.string().orEmpty()).optJSONObject("device"))
+                Wol.save(prefs, ip, macs + listOfNotNull(Wol.arp(ip)))
+            }
+        } catch (_: Exception) { Wol.save(prefs, ip, listOfNotNull(Wol.arp(ip))) }
+    }.start()
+
+    /** Launches an app over REST; tries each known app id (they differ by TV year) until one succeeds. */
+    private fun launchApp(vararg ids: String): Boolean {
+        val ip = currentIp ?: return false
+        Thread {
+            for (id in ids) {
+                try {
+                    Net.client.newCall(Request.Builder().url("http://$ip:8001/api/v2/applications/$id")
+                        .post(okhttp3.RequestBody.create(null, ByteArray(0))).build()).execute().use { if (it.isSuccessful) return@Thread }
+                } catch (_: Exception) {}
+            }
+        }.start()
+        return true
+    }
 
     override fun connect(ip: String) {
         disconnect()
         val gen = ++generation
+        currentIp = ip
         onState(ConnState.Connecting, null)
         val name = Base64.encodeToString("UniversalRemote".toByteArray(), Base64.NO_WRAP)
         val token = prefs.getString(tokenKey(ip), null)
@@ -43,6 +69,7 @@ class SamsungRemote(context: Context) : TvRemote {
                             json.optJSONObject("data")?.optString("token")?.takeIf { it.isNotEmpty() }
                                 ?.let { prefs.edit().putString(tokenKey(ip), it).apply() }
                             prefs.edit().putString("ip", ip).apply()
+                            learnMac(ip)
                             onState(ConnState.Connected, null)
                         }
                         "ms.channel.timeOut" -> onState(ConnState.Disconnected, "TV pairing timed out")
@@ -73,7 +100,14 @@ class SamsungRemote(context: Context) : TvRemote {
         return socket?.send(msg.toString()) ?: false
     }
 
-    override fun key(code: String): Boolean = send(
+    override fun key(code: String): Boolean = when (code) {
+        "KEY_NETFLIX" -> launchApp("3201907018807", "11101200001")
+        "KEY_AMAZON" -> launchApp("3201910019365", "3201512006785")
+        "KEY_HDMI1", "KEY_HDMI2", "KEY_HDMI3" -> rawKey("KEY_HDMI") // Samsung only has a cycling HDMI key
+        else -> rawKey(code)
+    }
+
+    private fun rawKey(code: String): Boolean = send(
         JSONObject().put("Cmd", "Click").put("DataOfCmd", code)
             .put("Option", "false").put("TypeOfRemote", "SendRemoteKey")
     )

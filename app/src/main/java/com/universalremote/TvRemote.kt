@@ -9,7 +9,7 @@ import javax.net.ssl.X509TrustManager
 
 enum class ConnState { Disconnected, Connecting, WaitingForApproval, Connected }
 
-enum class Brand(val label: String) { Samsung("Samsung"), LG("LG") }
+enum class Brand(val label: String) { Samsung("Samsung"), LG("LG"), Roku("Roku") }
 
 interface TvRemote {
     var onState: (ConnState, String?) -> Unit
